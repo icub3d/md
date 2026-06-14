@@ -2,6 +2,17 @@ use crate::theme::{Style, Color, Theme, ThemeType};
 use pulldown_cmark::{Event, Tag, TagEnd, CodeBlockKind};
 use resvg::usvg::{TreeParsing, TreePostProc};
 
+/// Which inline-image protocol (if any) the current terminal supports.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ImageProtocol {
+    /// No image support — fall back to ASCII boxes.
+    None,
+    /// Kitty Graphics Protocol (Kitty, WezTerm, Ghostty, …).
+    Kitty,
+    /// iTerm2 Inline Images Protocol (iTerm2 on macOS).
+    ITerm2,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LastBlockKind {
     None,
@@ -16,7 +27,7 @@ pub enum LastBlockKind {
 pub struct MarkdownRenderer<'a> {
     theme: &'a Theme,
     width: usize,
-    no_images: bool,
+    image_protocol: ImageProtocol,
     
     // Style stack
     style_stack: Vec<Style>,
@@ -91,7 +102,7 @@ enum BlockKind {
 }
 
 impl<'a> MarkdownRenderer<'a> {
-    pub fn new(theme: &'a Theme, width: usize, no_images: bool) -> Self {
+    pub fn new(theme: &'a Theme, width: usize, image_protocol: ImageProtocol) -> Self {
         let syntax_theme = match theme.theme_type {
             ThemeType::Mocha => {
                 let bytes = include_bytes!("assets/Catppuccin-mocha.tmTheme");
@@ -116,14 +127,14 @@ impl<'a> MarkdownRenderer<'a> {
         let syntax_set = syntect::parsing::SyntaxSet::load_defaults_newlines();
 
         let mut fontdb = resvg::usvg::fontdb::Database::new();
-        if !no_images {
+        if image_protocol != ImageProtocol::None {
             fontdb.load_system_fonts();
         }
 
         Self {
             theme,
             width,
-            no_images,
+            image_protocol,
             style_stack: Vec::new(),
             current_style: Style::default(),
             list_stack: Vec::new(),
@@ -982,7 +993,7 @@ impl<'a> MarkdownRenderer<'a> {
     // --- Graph and Math Renderers ---
 
     fn render_mermaid(&self, content: &str) -> String {
-        if self.no_images {
+        if self.image_protocol == ImageProtocol::None {
             return self.render_mermaid_fallback(content);
         }
         
@@ -1004,7 +1015,7 @@ impl<'a> MarkdownRenderer<'a> {
         };
 
         let (cols, rows) = self.calculate_terminal_cells(svg_width, svg_height, 50);
-        let image_esc = self.render_kitty_image(&png_bytes, cols, rows);
+        let image_esc = self.render_image(&png_bytes, cols, rows);
         
         let doc_indent = self.document_indent();
         let bq_prefix = self.blockquote_prefix();
@@ -1015,7 +1026,7 @@ impl<'a> MarkdownRenderer<'a> {
     }
 
     fn render_math(&self, content: &str) -> String {
-        if self.no_images {
+        if self.image_protocol == ImageProtocol::None {
             return self.render_math_fallback(content);
         }
 
@@ -1036,7 +1047,7 @@ impl<'a> MarkdownRenderer<'a> {
         };
 
         let (cols, rows) = self.calculate_terminal_cells(svg_width, svg_height, 40);
-        let image_esc = self.render_kitty_image(&png_bytes, cols, rows);
+        let image_esc = self.render_image(&png_bytes, cols, rows);
 
         let doc_indent = self.document_indent();
         let bq_prefix = self.blockquote_prefix();
@@ -1047,7 +1058,7 @@ impl<'a> MarkdownRenderer<'a> {
     }
 
     fn render_inline_math(&self, content: &str) -> Vec<Token> {
-        if self.no_images {
+        if self.image_protocol == ImageProtocol::None {
             return self.tokenize_text(&format!("[Math: {}]", content), &self.current_style);
         }
         
@@ -1064,7 +1075,7 @@ impl<'a> MarkdownRenderer<'a> {
         let aspect_ratio = svg_height / svg_width;
         let cols = ((2.0 / aspect_ratio).round() as usize).clamp(2, 30);
 
-        let escape_code = self.render_kitty_image(&png_bytes, cols, 1);
+        let escape_code = self.render_image(&png_bytes, cols, 1);
         
         vec![Token::Word(Word {
             chunks: vec![StyledChunk {
@@ -1170,6 +1181,15 @@ impl<'a> MarkdownRenderer<'a> {
         Some((width, height))
     }
 
+    /// Dispatch to the appropriate image renderer based on detected protocol.
+    fn render_image(&self, png_bytes: &[u8], cols: usize, rows: usize) -> String {
+        match self.image_protocol {
+            ImageProtocol::Kitty => self.render_kitty_image(png_bytes, cols, rows),
+            ImageProtocol::ITerm2 => self.render_iterm2_image(png_bytes, cols, rows),
+            ImageProtocol::None => String::new(),
+        }
+    }
+
     fn render_kitty_image(&self, png_bytes: &[u8], cols: usize, rows: usize) -> String {
         use base64::Engine;
         let b64 = base64::engine::general_purpose::STANDARD.encode(png_bytes);
@@ -1219,6 +1239,27 @@ impl<'a> MarkdownRenderer<'a> {
             }
         }
         
+        // Advance the cursor by `rows` lines so subsequent text is not drawn on top.
+        out.push_str(&"\n".repeat(rows));
+        out
+    }
+
+    /// Render a PNG using the iTerm2 Inline Images Protocol.
+    ///
+    /// Protocol: `ESC ] 1337 ; File=inline=1;width=<cols>;height=<rows>;size=<bytes>:<b64> BEL`
+    /// Reference: https://iterm2.com/documentation-images.html
+    fn render_iterm2_image(&self, png_bytes: &[u8], cols: usize, rows: usize) -> String {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(png_bytes);
+        let size = png_bytes.len();
+
+        // width/height in character cells; iTerm2 also accepts pixel values with the
+        // "px" suffix, but cell counts work well for our layout model.
+        let mut out = format!(
+            "\x1b]1337;File=inline=1;width={cols};height={rows};size={size};preserveAspectRatio=1:{b64}\x07"
+        );
+        // Advance cursor past the image rows.
+        out.push_str(&"\n".repeat(rows));
         out
     }
 
@@ -1292,7 +1333,7 @@ mod tests {
     #[test]
     fn test_mermaid_to_png() {
         let theme = Theme::new("terminal");
-        let renderer = MarkdownRenderer::new(&theme, 80, false);
+        let renderer = MarkdownRenderer::new(&theme, 80, ImageProtocol::Kitty);
         let content = "flowchart TD\n    A[Start] --> B{Is supporting terminal?}\n    B -->|Yes| C[Render high-res image via Kitty protocol]\n    B -->|No| D[Render standard ASCII box fallback]\n    C --> E[Done]\n    D --> E";
         let svg = mermaid_rs_renderer::render(content).unwrap();
         let (png, _) = renderer.svg_to_png(&svg).unwrap();
@@ -1307,7 +1348,7 @@ mod tests {
     #[test]
     fn test_math_to_png() {
         let theme = Theme::new("terminal");
-        let renderer = MarkdownRenderer::new(&theme, 80, false);
+        let renderer = MarkdownRenderer::new(&theme, 80, ImageProtocol::Kitty);
         let svg = renderer.latex_to_svg("e^{i\\pi} + 1 = 0").unwrap();
         let (png, _) = renderer.svg_to_png(&svg).unwrap();
         let dims = MarkdownRenderer::get_png_dimensions(&png);
@@ -1315,5 +1356,29 @@ mod tests {
         let (w, h) = dims.unwrap();
         assert!(w > 0 && h > 0);
         assert!(png.iter().filter(|&&b| b != 0).count() > 100, "Math PNG is transparent");
+    }
+
+    #[test]
+    fn test_iterm2_image_escape() {
+        let theme = Theme::new("terminal");
+        let renderer = MarkdownRenderer::new(&theme, 80, ImageProtocol::ITerm2);
+        // Minimal 1x1 PNG
+        let png_bytes: Vec<u8> = vec![
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+            0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+            0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
+            0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41,
+            0x54, 0x08, 0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0x00,
+            0x00, 0x00, 0x02, 0x00, 0x01, 0xe2, 0x21, 0xbc,
+            0x33, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e,
+            0x44, 0xae, 0x42, 0x60, 0x82,
+        ];
+        let out = renderer.render_iterm2_image(&png_bytes, 10, 2);
+        assert!(out.contains("\x1b]1337;"), "Missing OSC 1337 header");
+        assert!(out.contains("inline=1"), "Missing inline=1");
+        assert!(out.contains("width=10"), "Missing width");
+        assert!(out.contains("height=2"), "Missing height");
+        assert!(out.ends_with("\n\n"), "Missing trailing newlines");
     }
 }

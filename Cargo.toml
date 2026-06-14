@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 clap = { version = "4.4", features = ["derive"] }
 crossterm = "0.27"
+libc = "0.2"
 pulldown-cmark = "0.10"
 textwrap = "0.16"
 syntect = "5.1"

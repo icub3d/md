@@ -686,6 +686,7 @@ dependencies = [
  "catppuccin",
  "clap",
  "crossterm",
+ "libc",
  "mermaid-rs-renderer",
  "pulldown-cmark",
  "ratex-layout",
