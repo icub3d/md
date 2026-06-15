@@ -1144,7 +1144,7 @@ impl<'a> MarkdownRenderer<'a> {
 
     fn calculate_terminal_cells(&self, width_px: f64, height_px: f64, max_cols: usize) -> (usize, usize) {
         let cols = self.width.saturating_sub(4).min(max_cols).max(10);
-        let rows = (((height_px / width_px) * (cols as f64) * 0.5).round() as usize).max(1);
+        let rows = (((height_px / width_px) * (cols as f64) * 0.55).round() as usize).max(1);
         (cols, rows)
     }
 

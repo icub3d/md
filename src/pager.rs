@@ -106,6 +106,10 @@ fn pager_loop(stdout: &mut io::Stdout, content: &str, filename: &str, image_prot
         // Leave 1 line for top title bar and 1 line for bottom status bar
         let viewport_height = height.saturating_sub(2);
 
+        // Clear the entire screen once at the beginning of the draw loop to
+        // prevent stale/stuck images and text overlapping when redrawing or scrolling.
+        queue!(stdout, terminal::Clear(terminal::ClearType::All))?;
+
         // Draw the top header bar
         let header_left = format!(" md ── {} ", filename);
         let header_right = " ['q': quit | '/': search | 'j'/'k': scroll] ";
@@ -116,7 +120,6 @@ fn pager_loop(stdout: &mut io::Stdout, content: &str, filename: &str, image_prot
         queue!(
             stdout,
             cursor::MoveTo(0, 0),
-            terminal::Clear(terminal::ClearType::CurrentLine),
             style::PrintStyledContent(
                 header_text
                     .bold()
@@ -135,8 +138,7 @@ fn pager_loop(stdout: &mut io::Stdout, content: &str, filename: &str, image_prot
             let file_row = scroll_row + i;
             queue!(
                 stdout,
-                cursor::MoveTo(0, (i + 1) as u16),
-                terminal::Clear(terminal::ClearType::CurrentLine)
+                cursor::MoveTo(0, (i + 1) as u16)
             )?;
 
             if file_row < raw_lines.len() {
@@ -370,3 +372,6 @@ fn pager_loop(stdout: &mut io::Stdout, content: &str, filename: &str, image_prot
 
     Ok(())
 }
+
+
+
