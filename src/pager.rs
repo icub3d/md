@@ -9,14 +9,19 @@ use crossterm::{
 use crate::renderer::ImageProtocol;
 
 /// Run the interactive terminal pager on the rendered markdown content.
-pub fn run_pager(content: &str, filename: &str, image_protocol: ImageProtocol) -> io::Result<()> {
+pub fn run_pager(
+    content: &str,
+    filename: &str,
+    image_protocol: ImageProtocol,
+    reload_callback: Option<Box<dyn FnMut() -> Result<String, String>>>,
+) -> io::Result<()> {
     let mut stdout = io::stdout();
 
     // Enable raw mode and enter alternate screen
     terminal::enable_raw_mode()?;
     execute!(stdout, EnterAlternateScreen, cursor::Hide)?;
 
-    let res = pager_loop(&mut stdout, content, filename, image_protocol);
+    let res = pager_loop(&mut stdout, content, filename, image_protocol, reload_callback);
 
     // Clean up any remaining Kitty images before leaving
     if image_protocol == ImageProtocol::Kitty {
@@ -86,17 +91,25 @@ fn strip_ansi_and_images(s: &str) -> String {
     result
 }
 
-fn pager_loop(stdout: &mut io::Stdout, content: &str, filename: &str, image_protocol: ImageProtocol) -> io::Result<()> {
-    let raw_lines: Vec<&str> = content.split('\n').collect();
+fn pager_loop(
+    stdout: &mut io::Stdout,
+    content: &str,
+    filename: &str,
+    image_protocol: ImageProtocol,
+    mut reload_callback: Option<Box<dyn FnMut() -> Result<String, String>>>,
+) -> io::Result<()> {
+    let mut current_content = content.to_string();
+    let mut raw_lines: Vec<String> = current_content.split('\n').map(|s| s.to_string()).collect();
     // Pre-calculate clean lines for searching
-    let clean_lines: Vec<String> = raw_lines
+    let mut clean_lines: Vec<String> = raw_lines
         .iter()
-        .map(|&line| strip_ansi_and_images(line).to_lowercase())
+        .map(|line| strip_ansi_and_images(line).to_lowercase())
         .collect();
 
     let mut scroll_row = 0;
     let mut search: Option<SearchState> = None;
     let mut input_buffer: Option<String> = None;
+    let mut reload_status: Option<Result<String, String>> = None;
 
     loop {
         let (width_val, height_val) = terminal::size()?;
@@ -112,7 +125,11 @@ fn pager_loop(stdout: &mut io::Stdout, content: &str, filename: &str, image_prot
 
         // Draw the top header bar
         let header_left = format!(" md ── {} ", filename);
-        let header_right = " ['q': quit | '/': search | 'j'/'k': scroll] ";
+        let header_right = if reload_callback.is_some() {
+            " ['q': quit | 'r': reload | '/': search | 'j'/'k': scroll] "
+        } else {
+            " ['q': quit | '/': search | 'j'/'k': scroll] "
+        };
         let header_len = header_left.chars().count() + header_right.chars().count();
         let header_padding = width.saturating_sub(header_len);
         let header_text = format!("{}{}{}", header_left, " ".repeat(header_padding), header_right);
@@ -142,7 +159,7 @@ fn pager_loop(stdout: &mut io::Stdout, content: &str, filename: &str, image_prot
             )?;
 
             if file_row < raw_lines.len() {
-                let line_content = raw_lines[file_row];
+                let line_content = &raw_lines[file_row];
                 // Highlight the line if it is the current search match
                 let is_current_match = search
                     .as_ref()
@@ -183,6 +200,23 @@ fn pager_loop(stdout: &mut io::Stdout, content: &str, filename: &str, image_prot
                         .bold()
                         .with(Color::Black)
                         .on(Color::Yellow)
+                )
+            )?;
+        } else if let Some(ref status) = reload_status {
+            let (status_text, status_color) = match status {
+                Ok(msg) => (format!(" {} ", msg), Color::Green),
+                Err(err) => (format!(" Error: {} ", err), Color::Red),
+            };
+            let status_len = status_text.chars().count();
+            let status_padding = width.saturating_sub(status_len);
+            let full_text = format!("{}{}", status_text, " ".repeat(status_padding));
+            queue!(
+                stdout,
+                style::PrintStyledContent(
+                    full_text
+                        .bold()
+                        .with(Color::Black)
+                        .on(status_color)
                 )
             )?;
         } else {
@@ -241,6 +275,8 @@ fn pager_loop(stdout: &mut io::Stdout, content: &str, filename: &str, image_prot
 
         // Wait for user input
         if let Event::Key(key) = event::read()? {
+            let _ = reload_status.take();
+
             // If typing search query
             if let Some(mut current_input) = input_buffer.take() {
                 match key.code {
@@ -294,6 +330,29 @@ fn pager_loop(stdout: &mut io::Stdout, content: &str, filename: &str, image_prot
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => {
                     break;
+                }
+                KeyCode::Char('r') => {
+                    if let Some(ref mut reload) = reload_callback {
+                        match reload() {
+                            Ok(new_content) => {
+                                current_content = new_content;
+                                raw_lines = current_content.split('\n').map(|s| s.to_string()).collect();
+                                clean_lines = raw_lines
+                                    .iter()
+                                    .map(|line| strip_ansi_and_images(line).to_lowercase())
+                                    .collect();
+                                // Adjust scroll_row if the new content is shorter
+                                if scroll_row + viewport_height > raw_lines.len() {
+                                    scroll_row = raw_lines.len().saturating_sub(viewport_height);
+                                }
+                                search = None;
+                                reload_status = Some(Ok("Reloaded successfully".to_string()));
+                            }
+                            Err(err_msg) => {
+                                reload_status = Some(Err(err_msg));
+                            }
+                        }
+                    }
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
                     if scroll_row > 0 {

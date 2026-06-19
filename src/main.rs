@@ -141,7 +141,58 @@ fn main() {
     let use_pager = !args.no_pager && is_tty();
 
     if use_pager {
-        if let Err(e) = pager::run_pager(&output, &filename_label, image_protocol) {
+        let mut reload_callback: Option<Box<dyn FnMut() -> Result<String, String>>> = None;
+
+        if let Some(ref path) = args.file {
+            let file_path = path.clone();
+            let theme_name = args.theme.clone();
+            let target_width = args.width;
+            let no_images = args.no_images;
+
+            reload_callback = Some(Box::new(move || {
+                let mut input = String::new();
+                match File::open(&file_path) {
+                    Ok(mut file) => {
+                        if let Err(e) = file.read_to_string(&mut input) {
+                            return Err(format!("Failed to read file: {}", e));
+                        }
+                    }
+                    Err(e) => {
+                        return Err(format!("Failed to open file: {}", e));
+                    }
+                }
+
+                let width = target_width.unwrap_or_else(|| {
+                    if let Ok((w, _)) = crossterm::terminal::size() {
+                        w as usize
+                    } else {
+                        80
+                    }
+                });
+
+                let theme = theme::Theme::new(&theme_name);
+                let preprocessed = preprocessor::preprocess_markdown(&input);
+
+                let mut options = pulldown_cmark::Options::empty();
+                options.insert(pulldown_cmark::Options::ENABLE_TABLES);
+                options.insert(pulldown_cmark::Options::ENABLE_TASKLISTS);
+                options.insert(pulldown_cmark::Options::ENABLE_STRIKETHROUGH);
+
+                let parser = pulldown_cmark::Parser::new_ext(&preprocessed, options);
+
+                let image_protocol = if no_images {
+                    ImageProtocol::None
+                } else {
+                    detect_image_protocol()
+                };
+
+                let mut renderer = renderer::MarkdownRenderer::new(&theme, width, image_protocol);
+                let output = renderer.render_events(parser);
+                Ok(output)
+            }));
+        }
+
+        if let Err(e) = pager::run_pager(&output, &filename_label, image_protocol, reload_callback) {
             eprintln!("Pager error: {}", e);
             print!("{}", output);
         }
