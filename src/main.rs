@@ -36,7 +36,7 @@ struct Args {
     no_pager: bool,
 
     /// Watch the input file and auto-reload the pager when it changes.
-    /// Can be toggled at runtime with the 'w' key. Has no effect when reading from stdin.
+    /// Can be toggled at runtime with the 'W' key. Has no effect when reading from stdin.
     #[arg(long)]
     watch: bool,
 }
