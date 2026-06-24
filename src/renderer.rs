@@ -1,6 +1,5 @@
 use crate::theme::{Style, Color, Theme, ThemeType};
 use pulldown_cmark::{Event, Tag, TagEnd, CodeBlockKind};
-use resvg::usvg::{TreeParsing, TreePostProc};
 
 /// Which inline-image protocol (if any) the current terminal supports.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -212,7 +211,7 @@ impl<'a> MarkdownRenderer<'a> {
                                 s.fg = Some(Color::Heading(lvl));
                             });
                         }
-                        Tag::BlockQuote => {
+                        Tag::BlockQuote(_) => {
                             self.blockquote_depth += 1;
                         }
                         Tag::List(start_idx) => {
@@ -298,7 +297,7 @@ impl<'a> MarkdownRenderer<'a> {
                                 list_state.index += 1;
                             }
                         }
-                        TagEnd::BlockQuote => {
+                        TagEnd::BlockQuote(_) => {
                             self.blockquote_depth = self.blockquote_depth.saturating_sub(1);
                         }
                         TagEnd::List(_) => {
@@ -1113,13 +1112,14 @@ impl<'a> MarkdownRenderer<'a> {
     }
 
     fn svg_to_png(&self, svg_str: &str) -> Result<(Vec<u8>, (f64, f64)), String> {
-        let opt = resvg::usvg::Options::default();
-        let mut usvg_tree = resvg::usvg::Tree::from_str(svg_str, &opt)
+        let mut opt = resvg::usvg::Options::default();
+        // Text-to-path conversion now happens inside `Tree::from_str`, driven by
+        // the fontdb carried on the options, so inject our preloaded database.
+        *opt.fontdb_mut() = self.fontdb.clone();
+        let usvg_tree = resvg::usvg::Tree::from_str(svg_str, &opt)
             .map_err(|e| format!("usvg parse error: {}", e))?;
 
-        usvg_tree.postprocess(resvg::usvg::PostProcessingSteps::default(), &self.fontdb);
-
-        let size = usvg_tree.size;
+        let size = usvg_tree.size();
         let svg_width = size.width() as f64;
         let svg_height = size.height() as f64;
 
