@@ -171,7 +171,7 @@ impl Style {
             }
         }
         if codes.is_empty() {
-            "".to_string()
+            String::new()
         } else {
             format!("\x1b[{}m", codes.join(";"))
         }

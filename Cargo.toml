@@ -6,12 +6,9 @@ edition = "2024"
 [dependencies]
 clap = { version = "4.4", features = ["derive"] }
 crossterm = "0.27"
-libc = "0.2"
 pulldown-cmark = "0.10"
-textwrap = "0.16"
 syntect = "5.1"
 base64 = "0.22"
-catppuccin = "2.0"
 resvg = "0.38"
 tiny-skia = "0.11"
 mermaid-rs-renderer = "0.2"
@@ -19,4 +16,5 @@ ratex-types = { git = "https://github.com/erweixin/RaTeX.git" }
 ratex-parser = { git = "https://github.com/erweixin/RaTeX.git" }
 ratex-layout = { git = "https://github.com/erweixin/RaTeX.git" }
 ratex-svg = { git = "https://github.com/erweixin/RaTeX.git", features = ["standalone", "embed-fonts"] }
+notify-debouncer-mini = "0.7.0"
 

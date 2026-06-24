@@ -34,6 +34,11 @@ struct Args {
     /// Disable pager even when output would normally be paged.
     #[arg(long)]
     no_pager: bool,
+
+    /// Watch the input file and auto-reload the pager when it changes.
+    /// Can be toggled at runtime with the 'w' key. Has no effect when reading from stdin.
+    #[arg(long)]
+    watch: bool,
 }
 
 /// Detect which inline image protocol (if any) the current terminal supports.
@@ -69,8 +74,34 @@ fn detect_image_protocol() -> ImageProtocol {
 
 /// Return true if stdout is a real terminal (tty).
 fn is_tty() -> bool {
-    use std::os::unix::io::AsRawFd;
-    unsafe { libc::isatty(io::stdout().as_raw_fd()) != 0 }
+    use std::io::IsTerminal;
+    io::stdout().is_terminal()
+}
+
+/// Resolve the wrap width: the explicit value if given, otherwise the terminal
+/// width, falling back to 80 columns when that can't be determined.
+fn resolve_width(width: Option<usize>) -> usize {
+    width.unwrap_or_else(|| {
+        crossterm::terminal::size()
+            .map(|(w, _)| w as usize)
+            .unwrap_or(80)
+    })
+}
+
+/// Run the full markdown pipeline (preprocess, parse, render) and return the
+/// ANSI-styled output ready for the terminal or pager.
+fn render_markdown(input: &str, theme_name: &str, width: usize, image_protocol: ImageProtocol) -> String {
+    let theme = theme::Theme::new(theme_name);
+    let preprocessed = preprocessor::preprocess_markdown(input);
+
+    let mut options = pulldown_cmark::Options::empty();
+    options.insert(pulldown_cmark::Options::ENABLE_TABLES);
+    options.insert(pulldown_cmark::Options::ENABLE_TASKLISTS);
+    options.insert(pulldown_cmark::Options::ENABLE_STRIKETHROUGH);
+
+    let parser = pulldown_cmark::Parser::new_ext(&preprocessed, options);
+    let mut renderer = renderer::MarkdownRenderer::new(&theme, width, image_protocol);
+    renderer.render_events(parser)
 }
 
 fn main() {
@@ -104,27 +135,7 @@ fn main() {
     };
 
     // Determine target width
-    let width = args.width.unwrap_or_else(|| {
-        if let Ok((w, _)) = crossterm::terminal::size() {
-            w as usize
-        } else {
-            80
-        }
-    });
-
-    // Initialize the theme
-    let theme = theme::Theme::new(&args.theme);
-
-    // Preprocess markdown to parse math safely
-    let preprocessed = preprocessor::preprocess_markdown(&input);
-
-    // Parse options
-    let mut options = pulldown_cmark::Options::empty();
-    options.insert(pulldown_cmark::Options::ENABLE_TABLES);
-    options.insert(pulldown_cmark::Options::ENABLE_TASKLISTS);
-    options.insert(pulldown_cmark::Options::ENABLE_STRIKETHROUGH);
-
-    let parser = pulldown_cmark::Parser::new_ext(&preprocessed, options);
+    let width = resolve_width(args.width);
 
     // Detect image protocol support
     let image_protocol = if args.no_images {
@@ -134,8 +145,7 @@ fn main() {
     };
 
     // Render output
-    let mut renderer = renderer::MarkdownRenderer::new(&theme, width, image_protocol);
-    let output = renderer.render_events(parser);
+    let output = render_markdown(&input, &args.theme, width, image_protocol);
 
     // Page output using our custom interactive pager if stdout is a tty and not disabled.
     let use_pager = !args.no_pager && is_tty();
@@ -147,7 +157,6 @@ fn main() {
             let file_path = path.clone();
             let theme_name = args.theme.clone();
             let target_width = args.width;
-            let no_images = args.no_images;
 
             reload_callback = Some(Box::new(move || {
                 let mut input = String::new();
@@ -162,37 +171,28 @@ fn main() {
                     }
                 }
 
-                let width = target_width.unwrap_or_else(|| {
-                    if let Ok((w, _)) = crossterm::terminal::size() {
-                        w as usize
-                    } else {
-                        80
-                    }
-                });
-
-                let theme = theme::Theme::new(&theme_name);
-                let preprocessed = preprocessor::preprocess_markdown(&input);
-
-                let mut options = pulldown_cmark::Options::empty();
-                options.insert(pulldown_cmark::Options::ENABLE_TABLES);
-                options.insert(pulldown_cmark::Options::ENABLE_TASKLISTS);
-                options.insert(pulldown_cmark::Options::ENABLE_STRIKETHROUGH);
-
-                let parser = pulldown_cmark::Parser::new_ext(&preprocessed, options);
-
-                let image_protocol = if no_images {
-                    ImageProtocol::None
-                } else {
-                    detect_image_protocol()
-                };
-
-                let mut renderer = renderer::MarkdownRenderer::new(&theme, width, image_protocol);
-                let output = renderer.render_events(parser);
-                Ok(output)
+                // Re-resolve the width on reload so resizing the terminal is picked up,
+                // but reuse the image protocol detected at startup (it can't change).
+                let width = resolve_width(target_width);
+                Ok(render_markdown(&input, &theme_name, width, image_protocol))
             }));
         }
 
-        if let Err(e) = pager::run_pager(&output, &filename_label, image_protocol, reload_callback) {
+        // The watcher needs a concrete path; resolve to an absolute path so directory
+        // watching and filename matching are reliable regardless of the cwd.
+        let watch_path = args
+            .file
+            .as_ref()
+            .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()));
+
+        if let Err(e) = pager::run_pager(
+            &output,
+            &filename_label,
+            image_protocol,
+            reload_callback,
+            watch_path,
+            args.watch,
+        ) {
             eprintln!("Pager error: {}", e);
             print!("{}", output);
         }
